@@ -1,4 +1,4 @@
-# Comprueba el paquete (R CMD check) en cada push / pull request.
+# Runs R CMD check on every push and pull request.
 on:
   push:
     branches: [main, master]

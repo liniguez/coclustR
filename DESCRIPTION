@@ -2,9 +2,9 @@ Package: coclustR
 Type: Package
 Title: Consensus Co-Clustering of Single-Cell Data Across a Parameter Grid
 Version: 0.1.0
-Authors@R: c(person("Luis P", "Iniguez", role = c("aut", "cre"),
+Authors@R: c(person("Luis P","Iniguez, role = c("aut", "cre"),
     email = "inigulu@gmail.com"),
-    	   c(person("Serafima", "Beletskaya", role = c("aut"))
+    person("Serafima","Beletskaya", role = c("aut"))
 Description: Runs graph-based clustering (Leiden or Louvain on shared nearest
     neighbour graphs, Seurat-style) over a grid of number of principal
     components, number of neighbours and resolutions. Cells with identical
@@ -14,8 +14,8 @@ Description: Runs graph-based clustering (Leiden or Louvain on shared nearest
     with 'dynamicTreeCut'. Works with 'SingleCellExperiment' and 'Seurat'
     objects or with a plain embedding matrix, and provides diagnostic plots.
 License: MIT + file LICENSE
-URL: https://github.com/liniguez/coclustR
-BugReports: https://github.com/liniguez/coclustR/issues
+URL: https://github.com/GITHUB_USER/coclustR
+BugReports: https://github.com/GITHUB_USER/coclustR/issues
 biocViews: SingleCell, Clustering, Software
 Encoding: UTF-8
 Depends: R (>= 4.1)

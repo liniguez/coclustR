@@ -1,41 +1,42 @@
 # coclustR
 
-Co-clustering de consenso para single-cell. Funciona con objetos **SingleCellExperiment**, **Seurat** o con una matriz de embedding (células × PCs).
+Consensus co-clustering for single-cell data. Works with **SingleCellExperiment** and **Seurat** objects, or with a plain embedding matrix (cells × PCs).
 
-1. Clustering Leiden/Louvain sobre grafos SNN (estilo Seurat) en una rejilla de `n_dims × k × resolutions`.
-2. Las células con el mismo vector de etiquetas en todas las corridas se colapsan en **meta-barcodes**.
-3. Se calcula la **matriz de co-clustering** (fracción de corridas en las que dos meta-barcodes caen en el mismo cluster).
-4. Los meta-barcodes inestables (core pequeño y poco estable) se marcan y se excluyen.
-5. Se construye un `hclust` sobre `1 - co` y se corta con **dynamicTreeCut** (`Hybrid` y `DynamicTree`).
-6. Las etiquetas vuelven a las células; las no asignadas quedan como `"Unstable"`.
+Choosing a single combination of number of PCs, number of neighbours and resolution is arbitrary: a different combination gives different clusters. `coclustR` clusters the cells with **every** combination of a parameter grid and keeps what is reproducible:
 
-## Instalación
+1. Leiden/Louvain clustering on Seurat-style SNN graphs over a grid of `n_dims × k × resolutions`.
+2. Cells with the same label vector across all runs are collapsed into **meta-barcodes**.
+3. A **co-clustering matrix** is computed (fraction of runs in which two meta-barcodes fall in the same cluster).
+4. Unstable meta-barcodes (small, weakly co-clustered core) are flagged and excluded.
+5. An `hclust` tree is built on `1 - co-clustering` and cut with **dynamicTreeCut** (`Hybrid` and `DynamicTree` methods).
+6. Labels are mapped back to cells; unassigned cells are labelled `"Unstable"`.
+
+## Installation
 
 ```r
-# Dependencias de Bioconductor
-BiocManager::install(c("bluster", "SingleCellExperiment"))
-install.packages(c("leidenbase", "igraph", "future.apply", "dynamicTreeCut", "ggplot2"))
-# Opcionales
-install.packages(c("SeuratObject", "circlize")); BiocManager::install("ComplexHeatmap")
-
-install.packages("coclustR_0.1.0.tar.gz", repos = NULL, type = "source")
+install.packages("remotes")
+remotes::install_github("liniguez/coclustR",
+                        dependencies = TRUE,     # also installs Seurat, ComplexHeatmap, ...
+                        build_vignettes = TRUE)
 ```
 
-## Viñetas
+Bioconductor dependencies (`bluster`, `SingleCellExperiment`, `ComplexHeatmap`) are resolved automatically. If you do not have Seurat and scater installed, drop `build_vignettes = TRUE`.
 
-El paquete trae dos viñetas con datos simulados (`simulate_sc_counts()`):
+## Vignettes
+
+Two vignettes with simulated data (`simulate_sc_counts()`):
 
 ```r
-vignette("coclustR-sce")     # flujo con SingleCellExperiment (explicación detallada)
-vignette("coclustR-seurat")  # flujo con Seurat
+vignette("coclustR-sce")     # SingleCellExperiment workflow (detailed explanation)
+vignette("coclustR-seurat")  # Seurat workflow
 browseVignettes("coclustR")
 ```
 
-## Uso rápido
+## Quick start
 
 ```r
 library(coclustR)
-future::plan(future::multisession, workers = 4)   # el paquete NO cambia el plan
+future::plan(future::multisession, workers = 4)   # the package never changes the plan
 options(future.globals.maxSize = 6 * 1024^3)
 
 # SingleCellExperiment
@@ -48,40 +49,41 @@ res <- get_coclust_result(sce)          # metadata(sce)$coclustR / seu@misc$cocl
 res
 ```
 
-### Equivalencia con los parámetros del script original
+### Main parameters
 
-| Script | Argumento |
-|---|---|
-| `resolutions`, `neighbours`, `n_dims` | `resolutions`, `k`, `n_dims` |
-| `pca.name` | `reduction` |
-| `random_seed` | `seed` |
-| `clustering_algorithm` | `algorithm = "leiden"/"louvain"` |
-| `prune_thresh` | `prune` |
-| `cluster_stability_thershold` | `stability_threshold` |
-| `Cells < 50 & CoreStab < 0.8` (hard-coded) | `min_core_cells`, `min_core_stability` |
-| `hclustMethod` | `linkage` |
-| `minModuleSize / minClusterSize = 50` | `min_cluster_size` |
-| `deepSplit` | `deep_split` |
+| Argument | Default | Meaning |
+|---|---|---|
+| `reduction` | `"PCA"` / `"pca"` | Embedding used to build the graphs |
+| `n_dims`, `k`, `resolutions` | `c(15,30,50,75,100)`, `seq(10,40,5)`, `seq(0.1,1.4,0.1)` | Parameter grid (490 runs) |
+| `algorithm` | `"leiden"` | `"leiden"` or `"louvain"` |
+| `prune` | `1/15` | SNN pruning threshold (as Seurat's `prune.SNN`) |
+| `seed` | `11` | Results are reproducible for any `future` plan |
+| `stability_threshold` | `0.5` | Co-clustering needed to belong to a meta-barcode's core |
+| `min_core_cells`, `min_core_stability` | `50`, `0.8` | Meta-barcodes below both are flagged as unstable |
+| `linkage` | `"complete"` | Linkage of the consensus tree |
+| `min_cluster_size` | `50` | Minimum module size for dynamicTreeCut, **in meta-barcodes** |
+| `deep_split` | `FALSE` | Sensitivity of the tree cut |
+| `rescue_min_cells` | `50` | Very stable populations collapsed into few meta-barcodes become clusters if they have at least this many cells |
 
-### Funciones por pasos
+### Step by step
 
 ```r
-grid <- run_clustering_grid(sce, reduction = "PCA", silhouette = TRUE)
+grid <- run_clustering_grid(sce, reduction = "PCA", silhouette = TRUE)   # slow part
 res  <- coclust_from_grid(grid, linkage = "average", min_cluster_size = 30)
-# reutilizar la rejilla con otro consenso, sin repetir los clusterings:
+# reuse the grid with another consensus, without re-running the clusterings:
 sce  <- run_coclustering(sce, grid = grid, linkage = "average")
 ```
 
-Bloques de bajo nivel: `build_snn_graphs()`, `collapse_metabarcodes()`,
+Low-level building blocks: `build_snn_graphs()`, `collapse_metabarcodes()`,
 `coclustering_matrix()`, `core_stability()`, `flag_unstable()`,
 `consensus_clusters()`.
 
-### Visualización
+### Visualisation
 
 ```r
-plot_grid_overview(sce)                      # k × resolución, nº de clusters y modularidad
-plot_grid_metrics(sce)                       # modularidad / silhouette / nº clusters vs resolución
-plot_stability(sce)                          # diagnóstico del filtro de inestables
+plot_grid_overview(sce)                      # k × resolution, number of clusters and modularity
+plot_grid_metrics(sce)                       # modularity / silhouette / n clusters vs resolution
+plot_stability(sce)                          # diagnostic of the unstable filter
 plot_clusters_embedding(sce, color_by = c("coclust_Hybrid", "coclust_DynamicTree"))
 plot_coclustering_heatmap(sce, n_cells = 1500,
                           stratify_by = c("Sample", "Hybrid"),
@@ -89,4 +91,4 @@ plot_coclustering_heatmap(sce, n_cells = 1500,
                           annotation_colors = list(Sex = c(Male = "green", Female = "purple")))
 ```
 
-Todas devuelven objetos ggplot (o `Heatmap` de ComplexHeatmap), combinables con patchwork.
+All return ggplot objects (or a ComplexHeatmap `Heatmap`) that can be combined with patchwork.
