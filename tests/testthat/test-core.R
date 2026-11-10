@@ -79,3 +79,12 @@ test_that("louvain also runs", {
                            algorithm = "louvain", verbose = FALSE)
   expect_equal(ncol(g$labels), 2)
 })
+
+test_that("the worker function does not carry the caller's frame", {
+  # Regression: the worker used to be a closure defined inside
+  # run_clustering_grid(), so it was serialised with the whole object and
+  # all the graphs (17 GB with ~110k cells).
+  w <- coclustR:::.grid_worker
+  expect_identical(environment(w), asNamespace("coclustR"))
+  expect_lt(length(serialize(w, NULL)), 1e6)
+})

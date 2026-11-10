@@ -74,6 +74,20 @@ build_snn_graphs <- function(emb, n_dims = c(15, 30, 50, 75, 100),
   match(memb, sort(unique(memb)))
 }
 
+# Clusters one graph at one resolution and computes the run metrics.
+# Defined at top level (not inside run_clustering_grid()) on purpose: a
+# closure would be serialised together with its enclosing frame and every
+# worker would receive the whole single-cell object and all the graphs.
+.grid_worker <- function(resolution, seed, g, x_sil, algorithm, n_iter) {
+  memb <- .cluster_graph(g, resolution, algorithm, seed, n_iter)
+  mod <- igraph::modularity(g, membership = memb,
+                            weights = igraph::E(g)$weight)
+  sil <- NA_real_
+  if (!is.null(x_sil) && length(unique(memb)) > 1)
+    sil <- mean(bluster::approxSilhouette(x_sil, memb)$width)
+  list(membership = memb, modularity = mod, silhouette = sil)
+}
+
 #' Run graph clustering over a grid of parameters
 #'
 #' For every combination of number of PCs (`n_dims`), neighbours (`k`) and
@@ -143,20 +157,16 @@ run_clustering_grid <- function(object, reduction = NULL,
       idx <- which(grid$n_dims == nd & grid$k == kk)
       if (verbose) message("Clustering n_dims = ", nd, ", k = ", kk,
                            " (", length(idx), " resolutions)")
-      out[idx] <- future.apply::future_lapply(
-        idx,
-        function(i, g, x_sil, grid, algorithm, n_iter) {
-          memb <- .cluster_graph(g, grid$resolution[i], algorithm,
-                                 grid$seed[i], n_iter)
-          mod <- igraph::modularity(g, membership = memb,
-                                    weights = igraph::E(g)$weight)
-          sil <- NA_real_
-          if (!is.null(x_sil) && length(unique(memb)) > 1)
-            sil <- mean(bluster::approxSilhouette(x_sil, memb)$width)
-          list(membership = memb, modularity = mod, silhouette = sil)
-        },
-        g = g, x_sil = x_sil, grid = grid, algorithm = algorithm,
-        n_iter = n_iter,
+      # Only the graph and the per-run parameters are sent to the workers.
+      # .grid_worker() lives in the package namespace, so it does not carry
+      # the frame of this function (object, embedding, all graphs) with it.
+      out[idx] <- future.apply::future_mapply(
+        .grid_worker,
+        resolution = grid$resolution[idx],
+        seed = grid$seed[idx],
+        MoreArgs = list(g = g, x_sil = x_sil, algorithm = algorithm,
+                        n_iter = n_iter),
+        SIMPLIFY = FALSE, USE.NAMES = FALSE,
         future.seed = TRUE,  # avoids RNG warnings; seeds are set explicitly
         future.packages = c("igraph", "leidenbase", "bluster")
       )

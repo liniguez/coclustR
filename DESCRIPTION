@@ -1,7 +1,7 @@
 Package: coclustR
 Type: Package
 Title: Consensus Co-Clustering of Single-Cell Data Across a Parameter Grid
-Version: 0.1.0
+Version: 0.1.1
 Authors@R: c(person("Luis P","Iniguez", role = c("aut", "cre"),
     email = "inigulu@gmail.com"),
     person("Serafima","Beletskaya", role = c("aut")))
