@@ -1,0 +1,293 @@
+---
+title: "Co-clustering de consenso con SingleCellExperiment"
+output:
+  rmarkdown::html_vignette:
+    toc: true
+    fig_width: 8
+    fig_height: 5
+vignette: >
+  %\VignetteIndexEntry{Co-clustering de consenso con SingleCellExperiment}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", message = FALSE,
+                      warning = FALSE, dpi = 80)
+```
+
+## Idea
+
+Elegir una sola combinación de parámetros (nº de PCs, nº de vecinos `k` y
+resolución) es arbitrario: con otra combinación los clusters cambian.
+`coclustR` corre el clustering con **todas** las combinaciones de una rejilla
+y se queda con lo que se repite:
+
+1. **Rejilla**: Leiden (o Louvain) sobre grafos SNN estilo Seurat para cada
+   combinación `n_dims × k × resolution`.
+2. **Meta-barcodes**: las células con exactamente las mismas etiquetas en
+   todas las corridas se agrupan (son indistinguibles para el consenso).
+3. **Matriz de co-clustering**: fracción de corridas en las que dos
+   meta-barcodes caen en el mismo cluster.
+4. **Filtro de inestables**: meta-barcodes con un "core" pequeño y poco
+   estable se marcan como `Unstable`.
+5. **Consenso**: árbol jerárquico sobre `1 - co-clustering`, cortado con
+   `dynamicTreeCut` (métodos `Hybrid` y `DynamicTree`).
+
+Esta viñeta usa un objeto `SingleCellExperiment`; la viñeta
+`vignette("coclustR-seurat")` hace lo mismo con Seurat.
+
+```{r libs}
+library(coclustR)
+library(SingleCellExperiment)
+library(scuttle)
+library(scater)
+```
+
+## Datos simulados
+
+`simulate_sc_counts()` genera cuentas binomiales negativas con poblaciones
+conocidas. Por diseño:
+
+* `Pop1` y `Pop2` comparten el 60 % de sus genes marcadores (difíciles de
+  separar);
+* `Pop5` es pequeña (60 células) y muy distinta: un **tipo celular raro**.
+
+```{r simulate}
+sim <- simulate_sc_counts(n_cells = c(400, 300, 250, 150, 60), seed = 1)
+sce <- SingleCellExperiment(list(counts = sim$counts),
+                            colData = sim$cell_data)
+sce
+table(sce$population)
+```
+
+Pre-procesado estándar: normalización, PCA y UMAP.
+
+```{r preprocess}
+sce <- logNormCounts(sce)
+set.seed(1)
+sce <- runPCA(sce, ncomponents = 30)
+sce <- runUMAP(sce, dimred = "PCA")
+plotReducedDim(sce, "UMAP", colour_by = "population")
+```
+
+## Paralelización
+
+`coclustR` usa el framework **future** pero **nunca cambia el plan**: lo
+eliges tú antes de correr. Los resultados son idénticos con cualquier plan
+para una misma `seed`.
+
+```{r plan, eval = FALSE}
+future::plan(future::multisession, workers = 4)
+options(future.globals.maxSize = 6 * 1024^3)
+```
+
+En esta viñeta lo corremos en secuencial:
+
+```{r plan-seq}
+future::plan(future::sequential)
+```
+
+## Paso 1: rejilla de clusterings
+
+Es el paso más lento; conviene guardarlo (`saveRDS(grid, ...)`) para poder
+repetir el consenso con otros parámetros sin recalcularlo. Aquí usamos una
+rejilla reducida (3 × 3 × 6 = 54 corridas); los valores por defecto del
+paquete son los del script original (5 × 7 × 14 = 490 corridas).
+
+```{r grid}
+grid <- run_clustering_grid(
+  sce,
+  reduction   = "PCA",
+  n_dims      = c(10, 20, 30),
+  k           = c(10, 20, 30),
+  resolutions = seq(0.2, 1.2, 0.2),
+  algorithm   = "leiden",
+  silhouette  = TRUE,   # opcional, más lento
+  seed        = 11,
+  verbose     = FALSE
+)
+grid
+head(grid$metrics)
+```
+
+`grid$labels` es una matriz células × corridas con las etiquetas de cada
+corrida.
+
+### Diagnóstico de la rejilla
+
+Número de clusters (color y texto) y modularidad (tamaño) para cada
+combinación:
+
+```{r overview, fig.height = 4}
+plot_grid_overview(grid)
+```
+
+Métricas en función de la resolución, una línea por `k`:
+
+```{r metrics, fig.height = 6}
+plot_grid_metrics(grid)
+```
+
+Las zonas planas (el nº de clusters no cambia al subir la resolución) suelen
+corresponder a estructura real. El silhouette baja casi siempre al subir la
+resolución, así que no conviene elegir parámetros solo por él.
+
+## Paso 2: consenso
+
+`run_coclustering()` añade las columnas `coclust_Hybrid` y
+`coclust_DynamicTree` al `colData` y guarda el resultado completo en
+`metadata(sce)$coclustR`. Le pasamos la rejilla ya calculada con `grid =`.
+
+`min_cluster_size` cuenta **meta-barcodes**, no células. En datos reales,
+con miles de meta-barcodes, 50 es razonable; en esta simulación hay pocos
+(los clusters son muy reproducibles), así que usamos 20.
+
+```{r consensus}
+sce <- run_coclustering(
+  sce,
+  grid                = grid,
+  stability_threshold = 0.5,
+  min_core_cells      = 50,
+  min_core_stability  = 0.8,
+  linkage             = "complete",
+  min_cluster_size    = 20,
+  rescue_min_cells    = 50
+)
+res <- get_coclust_result(sce)
+res
+```
+
+Comparación con las poblaciones simuladas:
+
+```{r compare}
+table(population = sce$population, Hybrid = sce$coclust_Hybrid)
+table(population = sce$population, DynamicTree = sce$coclust_DynamicTree)
+```
+
+¿Es mejor el consenso que una corrida individual? Comparamos el índice de
+Rand ajustado (ARI) del consenso con el de cada una de las 54 corridas:
+
+```{r ari, fig.height = 3.5}
+ari <- function(x) bluster::pairwiseRand(sce$population, x, mode = "index")
+ari_runs <- apply(grid$labels, 2, ari)
+ari_hybrid <- ari(sce$coclust_Hybrid)
+
+summary(ari_runs)
+ari_hybrid
+
+library(ggplot2)
+ggplot(data.frame(ARI = ari_runs), aes(ARI)) +
+  geom_histogram(bins = 20, fill = "grey70") +
+  geom_vline(xintercept = ari_hybrid, colour = "red", linewidth = 1) +
+  labs(title = "ARI de cada corrida (gris) vs consenso Hybrid (rojo)") +
+  theme_bw()
+```
+
+Aquí ambos métodos coinciden. En general `DynamicTree` es más
+conservador: cuando dos poblaciones se solapan (como `Pop1` y `Pop2`) deja
+muchas de sus células como `Unstable`, mientras que `Hybrid` las asigna
+(su paso PAM manda cada meta-barcode al cluster más cercano). `Hybrid` suele
+ser la opción recomendable; `DynamicTree` sirve para ver qué núcleos son
+más sólidos (en la viñeta de Seurat se ve esa diferencia).
+
+## Visualización
+
+Clusters de consenso sobre el UMAP (funciona igual con objetos Seurat):
+
+```{r umap, fig.height = 4}
+plot_clusters_embedding(sce, color_by = c("coclust_Hybrid",
+                                          "coclust_DynamicTree",
+                                          "population"))
+```
+
+Diagnóstico del filtro de inestables: cada punto es un meta-barcode; los
+inestables son los que quedan abajo a la izquierda de las líneas
+(`min_core_cells`, `min_core_stability`).
+
+La estabilidad del core se calcula **excluyendo al propio meta-barcode**, así
+que un meta-barcode aislado (no co-clusteriza ≥ `stability_threshold` con
+ningún otro) tiene estabilidad 0 y aparece abajo del todo. Si tiene al menos
+`min_core_cells` células se conserva (es el caso de `Pop5`: una población
+distinta que siempre sale junta); si tiene menos, se marca como inestable.
+Es decir, `min_core_cells` actúa también como **tamaño mínimo de población**
+que se puede detectar: bájalo si buscas tipos celulares más raros.
+
+```{r stability, fig.height = 4}
+plot_stability(sce)
+```
+
+Matriz de co-clustering sobre una muestra de células, estratificada por
+muestra y cluster, con anotaciones de cualquier columna del `colData`:
+
+```{r heatmap, fig.height = 6, fig.width = 7}
+plot_coclustering_heatmap(sce, n_cells = 500,
+                          stratify_by = c("Sample", "Hybrid"),
+                          annotate_by = c("Sample", "population"))
+```
+
+Si no tienes ComplexHeatmap instalado, `engine = "ggplot"` da una versión
+simple.
+
+## Ajustar el consenso sin repetir la rejilla
+
+`coclust_from_grid()` repite solo el consenso (segundos). Por ejemplo, para
+ver el efecto del **rescate de poblaciones estables**: `Pop5` es tan
+distinta que todas sus células reciben las mismas etiquetas en todas las
+corridas, así que queda reducida a **un único meta-barcode**. Sin rescate,
+dynamicTreeCut no puede convertir un solo meta-barcode en cluster:
+
+```{r rescue}
+no_rescue <- coclust_from_grid(grid, min_cluster_size = 20,
+                               rescue_min_cells = NULL, verbose = FALSE)
+table(population = sce$population, Hybrid = no_rescue$cell_clusters$Hybrid)
+```
+
+`Pop5` queda como `Unstable`, `Pop4` (también muy reproducible) también, y
+el paso PAM de Hybrid llega a meter `Pop3` en el mismo cluster que `Pop1`.
+Con `rescue_min_cells = 50` (por defecto) cada una se recupera como su propio
+cluster.
+
+Otros parámetros que se pueden explorar así: `linkage` (`"average"`,
+`"ward.D2"`), `deep_split`, `min_cluster_size`, `min_cluster_cells`,
+`stability_threshold`.
+
+```{r deep}
+deep <- coclust_from_grid(grid, min_cluster_size = 20, deep_split = 2,
+                          methods = "hybrid", verbose = FALSE)
+table(population = sce$population, Hybrid = deep$cell_clusters$Hybrid)
+```
+
+Para guardar una versión alternativa en el objeto, con otro prefijo:
+
+```{r store-alt}
+sce <- run_coclustering(sce, grid = grid, min_cluster_size = 20,
+                        linkage = "average", prefix = "coclustAvg_",
+                        verbose = FALSE)
+grep("coclust", colnames(colData(sce)), value = TRUE)
+```
+
+(El resultado completo guardado en `metadata(sce)$coclustR` es siempre el de
+la última llamada.)
+
+## Funciones de bajo nivel
+
+Cada paso del pipeline está disponible por separado:
+
+```{r lowlevel}
+mb    <- collapse_metabarcodes(grid$labels)            # meta-barcodes
+co    <- coclustering_matrix(mb$labels)                # matriz de consenso
+stab  <- core_stability(co, mb$sizes, threshold = 0.5)
+unst  <- flag_unstable(stab, min_core_cells = 50, min_core_stability = 0.8)
+cons  <- consensus_clusters(co[!unst, !unst], mb$sizes[!unst],
+                            min_cluster_size = 20)
+
+c(cells = ncol(sce), metabarcodes = nrow(mb$labels), unstable = sum(unst))
+head(cons$labels)
+```
+
+## Sesión
+
+```{r session}
+sessionInfo()
+```

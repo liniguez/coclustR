@@ -1,0 +1,226 @@
+---
+title: "Co-clustering de consenso con Seurat"
+output:
+  rmarkdown::html_vignette:
+    toc: true
+    fig_width: 8
+    fig_height: 5
+vignette: >
+  %\VignetteIndexEntry{Co-clustering de consenso con Seurat}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", message = FALSE,
+                      warning = FALSE, dpi = 80)
+```
+
+## Idea
+
+En vez de elegir una resolución en `FindClusters()`, `coclustR` clusteriza
+con todas las combinaciones de nº de PCs, nº de vecinos y resolución, y
+construye un consenso a partir de la frecuencia con la que cada par de
+células cae en el mismo cluster. La explicación detallada de cada paso está
+en `vignette("coclustR-sce")`; aquí nos centramos en el flujo con Seurat.
+
+```{r libs}
+library(coclustR)
+library(Seurat)
+library(ggplot2)
+```
+
+## Datos simulados y pipeline estándar de Seurat
+
+`simulate_sc_counts()` genera cinco poblaciones conocidas: `Pop1` y `Pop2`
+se parecen (comparten marcadores) y `Pop5` es un tipo celular raro y muy
+distinto (60 células).
+
+```{r simulate}
+sim <- simulate_sc_counts(n_cells = c(400, 300, 250, 150, 60), seed = 1)
+seu <- CreateSeuratObject(counts = sim$counts, meta.data = sim$cell_data)
+seu
+```
+
+```{r preprocess}
+seu <- NormalizeData(seu, verbose = FALSE)
+seu <- FindVariableFeatures(seu, verbose = FALSE)
+seu <- ScaleData(seu, verbose = FALSE)
+seu <- RunPCA(seu, npcs = 30, verbose = FALSE)
+seu <- RunUMAP(seu, dims = 1:30, verbose = FALSE)
+DimPlot(seu, group.by = "population")
+```
+
+## Referencia: un único `FindClusters()`
+
+Para comparar, el clustering habitual de Seurat con dos resoluciones:
+
+```{r seurat-clusters}
+seu <- FindNeighbors(seu, dims = 1:30, verbose = FALSE)
+seu <- FindClusters(seu, resolution = c(0.3, 1.2), verbose = FALSE)
+table(population = seu$population, res0.3 = seu$RNA_snn_res.0.3)
+table(population = seu$population, res1.2 = seu$RNA_snn_res.1.2)
+```
+
+Según la resolución, el resultado cambia; el consenso evita tener que
+elegir una.
+
+## Co-clustering de consenso
+
+El paquete no cambia el plan de **future**; para paralelizar:
+
+```{r plan, eval = FALSE}
+future::plan(future::multisession, workers = 4)
+options(future.globals.maxSize = 6 * 1024^3)
+```
+
+Aquí lo corremos en secuencial con una rejilla reducida (54 corridas):
+
+```{r grid}
+future::plan(future::sequential)
+
+grid <- run_clustering_grid(
+  seu,
+  reduction   = "pca",          # nombre de la reducción en Seurat
+  n_dims      = c(10, 20, 30),
+  k           = c(10, 20, 30),
+  resolutions = seq(0.2, 1.2, 0.2),
+  seed        = 11,
+  verbose     = FALSE
+)
+grid
+```
+
+> Nota: el `k` de `bluster::makeSNNGraph()` no cuenta la propia célula, a
+> diferencia de `k.param` en `FindNeighbors()`: `k = 20` equivale
+> aproximadamente a `k.param = 21`. La poda (`prune = 1/15`) es la misma
+> que `prune.SNN` de Seurat.
+
+```{r grid-plots, fig.height = 4}
+plot_grid_overview(grid)
+plot_grid_metrics(grid, metrics = c("modularity", "n_clusters"))
+```
+
+Consenso con los parámetros por defecto (complete linkage,
+`min_cluster_size = 50`). Las etiquetas se añaden a `seu@meta.data` y el
+resultado completo se guarda en `seu@misc$coclustR`:
+
+```{r consensus}
+seu <- run_coclustering(seu, grid = grid)
+get_coclust_result(seu)
+head(seu[[c("population", "coclust_Hybrid", "coclust_DynamicTree")]])
+```
+
+```{r compare}
+table(population = seu$population, Hybrid = seu$coclust_Hybrid)
+```
+
+`Pop3`, `Pop4` y la población rara `Pop5` se recuperan bien, pero con
+*complete linkage* `Pop1` y `Pop2` (que comparten marcadores) quedan en el
+mismo cluster. No es un fallo del consenso: en el PCA de Seurat (más ruidoso
+que el de la viñeta de SingleCellExperiment) muchas corridas de la rejilla
+mezclan o reparten de forma distinta estas dos poblaciones, así que sus
+meta-barcodes co-clusterizan de forma intermedia. `DynamicTree`, más
+conservador, deja buena parte de esas células como `Unstable`:
+
+```{r compare-dyn}
+table(population = seu$population, DynamicTree = seu$coclust_DynamicTree)
+```
+
+### Probar otro linkage sin repetir la rejilla
+
+El consenso tarda segundos, así que se puede explorar. Con *average
+linkage* (que usa el co-clustering medio entre grupos en vez del mínimo)
+`Pop1` y `Pop2` se separan. Guardamos el resultado con otro prefijo para
+conservar ambos:
+
+```{r average}
+seu <- run_coclustering(seu, grid = grid, linkage = "average",
+                        prefix = "coclustAvg_", verbose = FALSE)
+table(population = seu$population, Hybrid_avg = seu$coclustAvg_Hybrid)
+```
+
+ARI frente a las poblaciones simuladas: consenso vs las dos resoluciones de
+`FindClusters()` y vs la mediana de las corridas de la rejilla.
+
+```{r ari}
+ari <- function(x) bluster::pairwiseRand(seu$population, x, mode = "index")
+round(c(FindClusters_res0.3 = ari(seu$RNA_snn_res.0.3),
+        FindClusters_res1.2 = ari(seu$RNA_snn_res.1.2),
+        grid_median         = median(apply(grid$labels, 2, ari)),
+        Hybrid_complete     = ari(seu$coclust_Hybrid),
+        Hybrid_average      = ari(seu$coclustAvg_Hybrid)), 3)
+```
+
+En datos reales no hay "verdad" con la que comparar: mira el heatmap de
+co-clustering (más abajo) y los marcadores para decidir si una división es
+biológica.
+
+## Visualización
+
+Las columnas nuevas son metadata normal de Seurat, así que `DimPlot()`
+funciona directamente:
+
+```{r dimplot, fig.height = 4}
+DimPlot(seu, group.by = c("coclust_Hybrid", "coclustAvg_Hybrid", "population"),
+        label = TRUE)
+```
+
+Las funciones de `coclustR` aceptan el objeto Seurat igual que un
+SingleCellExperiment (por defecto usan la reducción `"umap"`). Las que usan
+el resultado guardado (`plot_stability()`, `plot_coclustering_heatmap()`)
+muestran el de la última llamada a `run_coclustering()`, aquí el de
+*average linkage*:
+
+```{r coclust-plots, fig.height = 4}
+plot_clusters_embedding(seu, color_by = c("coclustAvg_Hybrid",
+                                          "coclustAvg_DynamicTree"))
+plot_stability(seu)
+```
+
+```{r heatmap, fig.height = 6, fig.width = 7}
+plot_coclustering_heatmap(seu, n_cells = 500,
+                          stratify_by = c("Sample", "Hybrid"),
+                          annotate_by = c("Sample", "population"))
+```
+
+## Marcadores de los clusters de consenso
+
+Las células `Unstable` se pueden excluir antes del análisis diferencial:
+
+```{r markers}
+Idents(seu) <- "coclustAvg_Hybrid"
+seu_stable <- subset(seu, idents = "Unstable", invert = TRUE)
+markers <- FindAllMarkers(seu_stable, only.pos = TRUE, verbose = FALSE)
+head(markers[order(markers$cluster, markers$p_val_adj), ], 10)
+```
+
+## Repetir solo el consenso
+
+`coclust_from_grid()` reutiliza la rejilla y devuelve el resultado sin
+tocar el objeto. Por ejemplo, sin el rescate de poblaciones estables, las
+poblaciones más reproducibles, que quedan reducidas a uno o pocos
+meta-barcodes, se pierden (`Unstable`) o el PAM de Hybrid las fusiona con
+otro cluster:
+
+```{r no-rescue}
+no_rescue <- coclust_from_grid(grid, linkage = "average",
+                               rescue_min_cells = NULL, verbose = FALSE)
+table(population = seu$population, Hybrid = no_rescue$cell_clusters$Hybrid)
+```
+
+## Usar un embedding integrado
+
+Si integraste muestras (Harmony, CCA, ...), basta con indicar la reducción
+correspondiente, p. ej. `run_coclustering(seu, reduction = "harmony")`.
+También se puede pasar directamente una matriz células × dimensiones:
+
+```{r matrix, eval = FALSE}
+res <- run_coclustering(Embeddings(seu, "pca"), n_dims = c(10, 20, 30))
+```
+
+## Sesión
+
+```{r session}
+sessionInfo()
+```

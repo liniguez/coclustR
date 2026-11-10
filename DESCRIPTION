@@ -1,0 +1,51 @@
+Package: coclustR
+Type: Package
+Title: Consensus Co-Clustering of Single-Cell Data Across a Parameter Grid
+Version: 0.1.0
+Authors@R: c(person("Luis P", "Iniguez", role = c("aut", "cre"),
+    email = "inigulu@gmail.com"),
+    	   c(person("Serafima", "Beletskaya", role = c("aut"))
+Description: Runs graph-based clustering (Leiden or Louvain on shared nearest
+    neighbour graphs, Seurat-style) over a grid of number of principal
+    components, number of neighbours and resolutions. Cells with identical
+    label vectors across all runs are collapsed into "meta-barcodes", a
+    co-clustering (consensus) matrix is computed, unstable meta-barcodes are
+    flagged and consensus clusters are obtained by cutting a hierarchical tree
+    with 'dynamicTreeCut'. Works with 'SingleCellExperiment' and 'Seurat'
+    objects or with a plain embedding matrix, and provides diagnostic plots.
+License: MIT + file LICENSE
+URL: https://github.com/liniguez/coclustR
+BugReports: https://github.com/liniguez/coclustR/issues
+biocViews: SingleCell, Clustering, Software
+Encoding: UTF-8
+Depends: R (>= 4.1)
+Imports:
+    bluster,
+    igraph (>= 1.3.0),
+    leidenbase,
+    future.apply,
+    dynamicTreeCut,
+    ggplot2,
+    stats,
+    grDevices,
+    utils,
+    methods
+Suggests:
+    SingleCellExperiment,
+    SummarizedExperiment,
+    S4Vectors,
+    SeuratObject,
+    ComplexHeatmap,
+    circlize,
+    future,
+    Matrix,
+    testthat (>= 3.0.0),
+    knitr,
+    rmarkdown,
+    scuttle,
+    scater,
+    Seurat
+VignetteBuilder: knitr
+Config/testthat/edition: 3
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.1
