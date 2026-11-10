@@ -4,7 +4,7 @@ Title: Consensus Co-Clustering of Single-Cell Data Across a Parameter Grid
 Version: 0.1.0
 Authors@R: c(person("Luis P","Iniguez", role = c("aut", "cre"),
     email = "inigulu@gmail.com"),
-    person("Serafima","Beletskaya", role = c("aut"))
+    person("Serafima","Beletskaya", role = c("aut")))
 Description: Runs graph-based clustering (Leiden or Louvain on shared nearest
     neighbour graphs, Seurat-style) over a grid of number of principal
     components, number of neighbours and resolutions. Cells with identical
